@@ -19,7 +19,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/galexrt/extended-ceph-exporter/collector"
@@ -27,9 +29,17 @@ import (
 	"go.uber.org/zap"
 )
 
-// minRefreshInterval keeps a misconfigured interval from turning a refresher
-// into a hot loop against the cluster.
-const minRefreshInterval = time.Second
+const (
+	// minRefreshInterval keeps a misconfigured interval from turning a refresher
+	// into a hot loop against the cluster.
+	minRefreshInterval = time.Second
+
+	// dutyCycleWarnRatio is the share of its interval a cycle may occupy before it
+	// is worth warning about. A collector sitting above this is on its way to
+	// overrunning the interval entirely, at which point every cycle gets abandoned
+	// and the metrics stop advancing; the warning is the early notice.
+	dutyCycleWarnRatio = 0.5
+)
 
 var (
 	scrapeDurationDesc = prometheus.NewDesc(
@@ -69,10 +79,20 @@ type ExtendedCephMetricsCollector struct {
 	defaultInterval time.Duration
 	intervals       map[string]time.Duration
 
-	// cache and lastRefresh are both keyed by collector name.
-	cacheMutex  sync.Mutex
+	// cache, self, lastRefresh and generation are keyed by collector name and
+	// guarded by cacheMutex. It is an RWMutex because scrapes only read; the
+	// refreshers are the sole writers.
+	//
+	// cache and self are separate because they have different publish rules. A
+	// failed cycle must not replace the data metrics, but it must still publish its
+	// own scrape_collector_success of 0 — otherwise the one metric that announces
+	// the failure would be dropped along with the partial data, and the cache would
+	// keep serving the previous success of 1.
+	cacheMutex  sync.RWMutex
 	cache       map[string][]prometheus.Metric
+	self        map[string][]prometheus.Metric
 	lastRefresh map[string]time.Time
+	generation  map[string]uint64
 }
 
 func NewExtendedCephMetricsCollector(ctx context.Context, logger *zap.Logger, clients map[string]*collector.Client, collectors map[string]collector.Collector, ctxTimeout time.Duration, defaultInterval time.Duration, intervals map[string]time.Duration) *ExtendedCephMetricsCollector {
@@ -85,7 +105,9 @@ func NewExtendedCephMetricsCollector(ctx context.Context, logger *zap.Logger, cl
 		defaultInterval: defaultInterval,
 		intervals:       intervals,
 		cache:           make(map[string][]prometheus.Metric, len(collectors)),
+		self:            make(map[string][]prometheus.Metric, len(collectors)),
 		lastRefresh:     make(map[string]time.Time, len(collectors)),
+		generation:      make(map[string]uint64, len(collectors)),
 	}
 }
 
@@ -110,15 +132,25 @@ func (n *ExtendedCephMetricsCollector) Collect(outgoingCh chan<- prometheus.Metr
 // snapshot copies the cached metrics of every collector and adds a refresh
 // timestamp for each.
 //
-// The copy is taken under the lock so that sending on the outgoing channel,
+// The copy is taken under the read lock so that sending on the outgoing channel,
 // which is paced by whoever is scraping, cannot stall the refreshers.
 func (n *ExtendedCephMetricsCollector) snapshot() []prometheus.Metric {
-	n.cacheMutex.Lock()
-	defer n.cacheMutex.Unlock()
+	n.cacheMutex.RLock()
+	defer n.cacheMutex.RUnlock()
 
-	metrics := make([]prometheus.Metric, 0, len(n.collectors))
+	// One refresh timestamp per collector, plus whatever each has cached.
+	total := len(n.collectors)
+	for _, cached := range n.cache {
+		total += len(cached)
+	}
+	for _, cached := range n.self {
+		total += len(cached)
+	}
+
+	metrics := make([]prometheus.Metric, 0, total)
 	for name := range n.collectors {
 		metrics = append(metrics, n.cache[name]...)
+		metrics = append(metrics, n.self[name]...)
 
 		// Always emitted, so a collector that has never completed a cycle shows
 		// up as 0 and stays alertable rather than being absent entirely.
@@ -127,10 +159,25 @@ func (n *ExtendedCephMetricsCollector) snapshot() []prometheus.Metric {
 			timestamp = float64(refreshed.Unix())
 		}
 
-		metrics = append(metrics, prometheus.MustNewConstMetric(lastRefreshDesc, prometheus.GaugeValue, timestamp, name))
+		if metric, ok := n.constMetric(lastRefreshDesc, timestamp, name); ok {
+			metrics = append(metrics, metric)
+		}
 	}
 
 	return metrics
+}
+
+// constMetric builds a const gauge, logging rather than panicking when the label
+// values do not match the Desc. See collector.Emit for why Must is avoided.
+func (n *ExtendedCephMetricsCollector) constMetric(desc *prometheus.Desc, value float64, labelValues ...string) (prometheus.Metric, bool) {
+	metric, err := prometheus.NewConstMetric(desc, prometheus.GaugeValue, value, labelValues...)
+	if err != nil {
+		n.logger.Error("failed to build metric", zap.String("desc", desc.String()), zap.Error(err))
+
+		return nil, false
+	}
+
+	return metric, true
 }
 
 // StartRefreshers launches one background refresher per enabled collector.
@@ -184,37 +231,82 @@ func (n *ExtendedCephMetricsCollector) refreshLoop(ctx context.Context, name str
 // it regardless is what keeps the loop alive and the refresh timestamp moving,
 // which is what makes a wedged collector visible instead of letting the exporter
 // serve stale metrics forever without ever reporting an error.
+//
+// Two rules govern what a finished cycle is allowed to publish:
+//
+//   - It must still be the current generation. A cycle the watchdog already
+//     abandoned may finish after a later one, and letting it write would replace
+//     newer data with older data while stamping it as freshly refreshed.
+//   - It must have succeeded. Collectors accumulate errors and keep walking, so a
+//     failed cycle can carry a partial result; publishing that would silently
+//     shrink the exported series set. Keeping the previous values and leaving
+//     lastRefresh alone makes the staleness signal do the talking instead.
 func (n *ExtendedCephMetricsCollector) refresh(name string, bound time.Duration) {
 	begin := time.Now()
+
+	n.cacheMutex.Lock()
+	n.generation[name]++
+	generation := n.generation[name]
+	n.cacheMutex.Unlock()
+
 	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
 
-		metrics := n.runCollector(name)
+		data, self, ok := n.runCollector(name)
 
 		n.cacheMutex.Lock()
 		defer n.cacheMutex.Unlock()
-		n.cache[name] = metrics
+
+		if n.generation[name] != generation {
+			n.logger.Warn("discarding the result of an abandoned refresh cycle, a later cycle already published",
+				zap.String("collector", name))
+
+			return
+		}
+
+		// Published even on failure: this carries scrape_collector_success, which is
+		// how a failed cycle becomes visible at all.
+		n.self[name] = self
+
+		if !ok {
+			n.logger.Warn("keeping the previously cached metrics because this cycle failed, the refresh timestamp deliberately does not advance",
+				zap.String("collector", name))
+
+			return
+		}
+
+		n.cache[name] = data
 		n.lastRefresh[name] = time.Now()
 	}()
 
 	select {
 	case <-done:
-		n.logger.Debug("refresh cycle complete", zap.String("collector", name), zap.Float64("took", time.Since(begin).Seconds()))
+		took := time.Since(begin)
+		n.logger.Debug("refresh cycle complete", zap.String("collector", name), zap.Float64("took", took.Seconds()))
+
+		if took > time.Duration(float64(bound)*dutyCycleWarnRatio) {
+			n.logger.Warn("refresh cycle is using a large share of its interval, it will start overrunning if this grows",
+				zap.String("collector", name), zap.Float64("took", took.Seconds()), zap.Duration("interval", bound))
+		}
 	case <-time.After(bound):
 		n.logger.Error("refresh cycle exceeded its interval and was abandoned, it may be blocked in librados and its goroutine will leak until the exporter is restarted",
 			zap.String("collector", name), zap.Duration("interval", bound))
 	}
 }
 
-// runCollector runs a single collector against every client and returns the
-// metrics it produced.
-func (n *ExtendedCephMetricsCollector) runCollector(name string) []prometheus.Metric {
+// runCollector runs a single collector against every client.
+//
+// It returns the collector's own metrics, this exporter's per client scrape
+// metrics, and whether every client succeeded. The two metric sets are kept apart
+// because a failed cycle must still publish its scrape metrics while leaving the
+// previously cached data alone.
+func (n *ExtendedCephMetricsCollector) runCollector(name string) (data []prometheus.Metric, self []prometheus.Metric, ok bool) {
 	coll := n.collectors[name]
 	metricsCh := make(chan prometheus.Metric)
 
-	collected := []prometheus.Metric{}
+	data = []prometheus.Metric{}
 
 	// Wait to ensure metricsCh is fully drained before the collected metrics
 	// are handed back
@@ -223,11 +315,13 @@ func (n *ExtendedCephMetricsCollector) runCollector(name string) []prometheus.Me
 		defer close(drained)
 
 		for metric := range metricsCh {
-			collected = append(collected, metric)
+			data = append(data, metric)
 		}
 	}()
 
-	wgCollection := sync.WaitGroup{}
+	var failed atomic.Bool
+	var selfMu sync.Mutex
+	var wgCollection sync.WaitGroup
 
 	for clientName, client := range n.clients {
 		wgCollection.Add(1)
@@ -235,23 +329,30 @@ func (n *ExtendedCephMetricsCollector) runCollector(name string) []prometheus.Me
 			defer wgCollection.Done()
 
 			begin := time.Now()
-			ctx, cancel := context.WithTimeout(n.ctx, n.ctxTimeout)
-			defer cancel()
-
-			err := coll.Update(ctx, client, metricsCh)
+			err := n.updateCollector(coll, name, clientName, client, metricsCh)
 			duration := time.Since(begin)
 			var success float64
 
 			if err != nil {
 				n.logger.Error(fmt.Sprintf("%s collector failed after %fs", name, duration.Seconds()), zap.Error(err))
+				failed.Store(true)
 				success = 0
 			} else {
 				n.logger.Debug(fmt.Sprintf("%s collector succeeded after %fs.", name, duration.Seconds()))
 				success = 1
 			}
 
-			metricsCh <- prometheus.MustNewConstMetric(scrapeDurationDesc, prometheus.GaugeValue, duration.Seconds(), name, clientName)
-			metricsCh <- prometheus.MustNewConstMetric(scrapeSuccessDesc, prometheus.GaugeValue, success, name, clientName)
+			// Built here rather than sent through metricsCh so they stay separable
+			// from the collector's own output.
+			selfMu.Lock()
+			defer selfMu.Unlock()
+
+			if metric, built := n.constMetric(scrapeDurationDesc, duration.Seconds(), name, clientName); built {
+				self = append(self, metric)
+			}
+			if metric, built := n.constMetric(scrapeSuccessDesc, success, name, clientName); built {
+				self = append(self, metric)
+			}
 		}(clientName, client)
 	}
 
@@ -259,5 +360,30 @@ func (n *ExtendedCephMetricsCollector) runCollector(name string) []prometheus.Me
 	close(metricsCh)
 	<-drained
 
-	return collected
+	return data, self, !failed.Load()
+}
+
+// updateCollector runs one collector against one client, converting a panic into
+// an error.
+//
+// This runs on a background goroutine, where an unrecovered panic terminates the
+// whole exporter rather than just this cycle. Containing it means a defect in a
+// collector, or in the cgo layer beneath it, degrades to a failed collector that
+// scrape_collector_success reports.
+func (n *ExtendedCephMetricsCollector) updateCollector(coll collector.Collector, name, clientName string, client *collector.Client, ch chan<- prometheus.Metric) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("collector panicked: %v", recovered)
+			n.logger.Error("recovered a panic in a collector",
+				zap.String("collector", name),
+				zap.String("client", clientName),
+				zap.Any("panic", recovered),
+				zap.ByteString("stack", debug.Stack()))
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(n.ctx, n.ctxTimeout)
+	defer cancel()
+
+	return coll.Update(ctx, client, ch)
 }

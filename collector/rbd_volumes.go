@@ -56,9 +56,6 @@ func (c *RBDVolumes) Update(ctx context.Context, client *Client, ch chan<- prome
 			return fmt.Errorf("failed to get image size for %s/%s (namespace: %q). %w", pool, name, namespace, err)
 		}
 
-		ch <- prometheus.MustNewConstMetric(rbdVolumeSizeDesc,
-			prometheus.GaugeValue, float64(size), pool, namespace, id, name)
-
-		return nil
+		return Emit(ch, rbdVolumeSizeDesc, float64(size), pool, namespace, id, name)
 	})
 }

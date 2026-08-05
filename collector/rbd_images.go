@@ -82,6 +82,38 @@ var (
 		ownerLabelNames(), nil)
 )
 
+// qosLimits pairs each QoS metadata key with the metric it feeds. Package level
+// because it is constant: rebuilding it inside the per image emit function meant
+// allocating it once per image per cycle.
+var qosLimits = []struct {
+	key  string
+	desc *prometheus.Desc
+}{
+	{metaKeyQoSReadIOPS, rbdImageQoSReadIOPSDesc},
+	{metaKeyQoSWriteIOPS, rbdImageQoSWriteIOPSDesc},
+}
+
+// consumedMetadataKeys is every image metadata key this collector reads.
+//
+// The map ListMetadata returns is narrowed to these keys immediately, because an
+// image can also carry secrets: a LUKS2 encrypted volume keeps its wrapped data
+// encryption key in rbd.csi.ceph.com/dek. Nothing here would emit it today, but
+// narrowing at the source means it cannot reach a log line or a label through some
+// later edit.
+var consumedMetadataKeys = buildConsumedMetadataKeys()
+
+func buildConsumedMetadataKeys() map[string]struct{} {
+	keys := make(map[string]struct{}, len(ownershipLabels)+len(qosLimits))
+	for _, o := range ownershipLabels {
+		keys[o.key] = struct{}{}
+	}
+	for _, limit := range qosLimits {
+		keys[limit.key] = struct{}{}
+	}
+
+	return keys
+}
+
 // ownerLabelNames returns the owner metric's label names, derived from
 // ownershipLabels so the two can never drift apart.
 func ownerLabelNames() []string {
@@ -91,6 +123,19 @@ func ownerLabelNames() []string {
 	}
 
 	return names
+}
+
+// retainConsumedMetadata narrows image metadata to the keys this collector reads,
+// dropping everything else including any secrets the image happens to carry.
+func retainConsumedMetadata(meta map[string]string) map[string]string {
+	consumed := make(map[string]string, len(consumedMetadataKeys))
+	for key := range consumedMetadataKeys {
+		if value, ok := meta[key]; ok {
+			consumed[key] = value
+		}
+	}
+
+	return consumed
 }
 
 type RBDImages struct{}
@@ -111,25 +156,24 @@ func (c *RBDImages) Update(ctx context.Context, client *Client, ch chan<- promet
 		var errs error
 
 		if size, err := image.GetSize(); err != nil {
-			errs = multierr.Append(errs, fmt.Errorf("failed to get size of image %s/%s. %w", pool, name, err))
+			errs = multierr.Append(errs, fmt.Errorf("failed to get size of image %s/%s (namespace: %q). %w", pool, name, namespace, err))
 		} else {
-			ch <- prometheus.MustNewConstMetric(rbdImageProvisionedBytesDesc,
-				prometheus.GaugeValue, float64(size), pool, namespace, name)
+			errs = multierr.Append(errs, Emit(ch, rbdImageProvisionedBytesDesc, float64(size), pool, namespace, name))
 		}
 
 		if created, err := image.GetCreateTimestamp(); err != nil {
-			errs = multierr.Append(errs, fmt.Errorf("failed to get create timestamp of image %s/%s. %w", pool, name, err))
+			errs = multierr.Append(errs, fmt.Errorf("failed to get create timestamp of image %s/%s (namespace: %q). %w", pool, name, namespace, err))
 		} else {
-			ch <- prometheus.MustNewConstMetric(rbdImageCreateTimestampDesc,
-				prometheus.GaugeValue, float64(created.Sec), pool, namespace, name)
+			errs = multierr.Append(errs, Emit(ch, rbdImageCreateTimestampDesc, float64(created.Sec), pool, namespace, name))
 		}
 
 		meta, err := image.ListMetadata()
 		if err != nil {
-			return multierr.Append(errs, fmt.Errorf("failed to list metadata of image %s/%s. %w", pool, name, err))
+			return multierr.Append(errs, fmt.Errorf("failed to list metadata of image %s/%s (namespace: %q). %w", pool, name, namespace, err))
 		}
+		meta = retainConsumedMetadata(meta)
 
-		emitRBDImageOwner(ch, pool, namespace, name, meta)
+		errs = multierr.Append(errs, emitRBDImageOwner(ch, pool, namespace, name, meta))
 
 		return multierr.Append(errs, emitRBDImageQoS(ch, pool, namespace, name, meta))
 	})
@@ -142,7 +186,7 @@ func (c *RBDImages) Update(ctx context.Context, client *Client, ch chan<- promet
 // empty, so that they stay visible instead of silently dropping out of tenant
 // queries. An image with no ownership keys at all produces no series, which
 // makes untagged images countable by comparing against provisioned_bytes.
-func emitRBDImageOwner(ch chan<- prometheus.Metric, pool, namespace, name string, meta map[string]string) {
+func emitRBDImageOwner(ch chan<- prometheus.Metric, pool, namespace, name string, meta map[string]string) error {
 	values := []string{pool, namespace, name}
 
 	tagged := false
@@ -155,26 +199,18 @@ func emitRBDImageOwner(ch chan<- prometheus.Metric, pool, namespace, name string
 	}
 
 	if !tagged {
-		return
+		return nil
 	}
 
-	ch <- prometheus.MustNewConstMetric(rbdImageOwnerDesc, prometheus.GaugeValue, 1, values...)
+	return Emit(ch, rbdImageOwnerDesc, 1, values...)
 }
 
 // emitRBDImageQoS publishes a QoS limit only for images that actually carry the
 // override, so that "no limit configured" stays distinguishable from a limit
 // that is explicitly set to 0.
 func emitRBDImageQoS(ch chan<- prometheus.Metric, pool, namespace, name string, meta map[string]string) error {
-	limits := []struct {
-		key  string
-		desc *prometheus.Desc
-	}{
-		{metaKeyQoSReadIOPS, rbdImageQoSReadIOPSDesc},
-		{metaKeyQoSWriteIOPS, rbdImageQoSWriteIOPSDesc},
-	}
-
 	var errs error
-	for _, limit := range limits {
+	for _, limit := range qosLimits {
 		raw, ok := meta[limit.key]
 		if !ok {
 			continue
@@ -182,11 +218,11 @@ func emitRBDImageQoS(ch chan<- prometheus.Metric, pool, namespace, name string, 
 
 		value, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
-			errs = multierr.Append(errs, fmt.Errorf("failed to parse %s=%q of image %s/%s. %w", limit.key, raw, pool, name, err))
+			errs = multierr.Append(errs, fmt.Errorf("failed to parse %s=%q of image %s/%s (namespace: %q). %w", limit.key, raw, pool, name, namespace, err))
 			continue
 		}
 
-		ch <- prometheus.MustNewConstMetric(limit.desc, prometheus.GaugeValue, value, pool, namespace, name)
+		errs = multierr.Append(errs, Emit(ch, limit.desc, value, pool, namespace, name))
 	}
 
 	return errs

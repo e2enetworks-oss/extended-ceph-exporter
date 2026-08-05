@@ -52,6 +52,24 @@ func errNoRGWAPI(client *Client) error {
 	return fmt.Errorf("client %q has no RGW API connection, configure a realm in realms.yaml or disable the RGW collectors", client.Name)
 }
 
+// Emit builds a const gauge and sends it on ch.
+//
+// This deliberately uses NewConstMetric rather than MustNewConstMetric: the Must
+// variant panics when the label values do not match the Desc, and collectors run
+// inside background goroutines where an unrecovered panic terminates the whole
+// exporter. Returning the error instead degrades a labelling mistake into a failed
+// collector, which is visible through scrape_collector_success.
+func Emit(ch chan<- prometheus.Metric, desc *prometheus.Desc, value float64, labelValues ...string) error {
+	metric, err := prometheus.NewConstMetric(desc, prometheus.GaugeValue, value, labelValues...)
+	if err != nil {
+		return fmt.Errorf("failed to build metric %s. %w", desc, err)
+	}
+
+	ch <- metric
+
+	return nil
+}
+
 type NewCollectorFunc func() (Collector, error)
 
 var Factories map[string]NewCollectorFunc = map[string]NewCollectorFunc{}

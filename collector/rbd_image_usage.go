@@ -52,10 +52,7 @@ func (c *RBDImageUsage) Update(ctx context.Context, client *Client, ch chan<- pr
 			return fmt.Errorf("failed to determine disk usage of image %s/%s (namespace: %q). %w", pool, name, namespace, err)
 		}
 
-		ch <- prometheus.MustNewConstMetric(rbdImageUsedBytesDesc,
-			prometheus.GaugeValue, float64(used), pool, namespace, name)
-
-		return nil
+		return Emit(ch, rbdImageUsedBytesDesc, float64(used), pool, namespace, name)
 	})
 }
 
