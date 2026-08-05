@@ -189,7 +189,7 @@ func TestConstMetricRejectsMismatchedLabels(t *testing.T) {
 }
 
 // StartRefreshers has to prime immediately, keep ticking, and stop when its context
-// is cancelled. A refresher that ignored cancellation would keep hitting the cluster
+// is canceled. A refresher that ignored cancellation would keep hitting the cluster
 // after shutdown.
 func TestStartRefreshersTicksAndStopsOnCancel(t *testing.T) {
 	fake := &fakeCollector{script: []cycle{{metrics: 1}}}

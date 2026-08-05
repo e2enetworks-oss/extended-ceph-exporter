@@ -90,16 +90,16 @@ func TestRBDCollectorsReportMissingRadosConnection(t *testing.T) {
 	}
 }
 
-// A cancelled context must stop the walk before it opens anything. Combined with
+// A canceled context must stop the walk before it opens anything. Combined with
 // the guard above this covers both of eachRBDImage's early exits.
-func TestEachRBDImageRespectsCancelledContext(t *testing.T) {
+func TestEachRBDImageRespectsCanceledContext(t *testing.T) {
 	client := &Client{Name: "default", Config: &config.Config{}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	if err := eachRBDImage(ctx, client, func(string, string, string, *rbd.Image) error {
-		t.Error("the per image function must not run with a cancelled context")
+		t.Error("the per image function must not run with a canceled context")
 
 		return nil
 	}); err == nil {
