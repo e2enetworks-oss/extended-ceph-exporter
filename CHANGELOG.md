@@ -1,4 +1,4 @@
-## Unreleased
+## 2.0.0 / 2026-08-05
 
 * [CHANGE] Container images are now published to `ghcr.io/e2enetworks-oss/extended-ceph-exporter` for `linux/amd64` and `linux/arm64`. The Docker Hub image is no longer published. `latest` follows the newest release and a version tag such as `1.8.0` is the safe pin; see [`RELEASE.md`](/RELEASE.md) for the full tag list.
 * [CHANGE] **BREAKING CHANGES** The Helm chart is removed. This fork ships a container image only; deploy it with your own manifests. The chart remains in git history at the `1.8.0` tag for anyone who needs it.
