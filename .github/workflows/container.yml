@@ -3,13 +3,12 @@ name: container
 # Publishes the container image for every commit that lands on main — that is,
 # every merged pull request.
 #
-#   ghcr.io/e2enetworks-oss/extended-ceph-exporter:edge          moving, latest main
-#   ghcr.io/e2enetworks-oss/extended-ceph-exporter:main          moving, branch alias
+#   ghcr.io/e2enetworks-oss/extended-ceph-exporter:main          moving, branch tip
 #   ghcr.io/e2enetworks-oss/extended-ceph-exporter:sha-<short>   immutable, per commit
 #
-# None of these are release tags. `latest` and the semantic version tags are
-# only ever moved by release.yml, so pulling `latest` never lands on an
-# unreleased main. Deploy `sha-<short>` when you want a pin that will not move.
+# Neither is a release tag. `latest` and the semantic version tags are only ever
+# moved by release.yml, so pulling `latest` never lands on an unreleased main.
+# Deploy `sha-<short>` when you want a pin that will not move.
 
 on:
   push:
@@ -35,8 +34,7 @@ jobs:
     with:
       # Not a released version — the label says so rather than claiming the
       # version this commit happens to sit on top of.
-      version: edge
+      version: main
       tags: |
-        type=raw,value=edge
         type=raw,value=main
         type=sha,prefix=sha-,format=short

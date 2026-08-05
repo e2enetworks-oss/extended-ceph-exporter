@@ -1,7 +1,7 @@
 name: build and push container
 
 # Reusable container build, called by:
-#   container.yml  every merge into main  -> edge / main / sha-<short>
+#   container.yml  every merge into main  -> main / sha-<short>
 #   release.yml    every v* tag           -> X.Y.Z / X.Y / X / latest
 # One definition means the image published on a merge and the image published on
 # a release are built identically; only the tags and the version label differ.

@@ -13,8 +13,8 @@
 3. **A release is a deliberate act.** Merging to `main` never cuts a release.
    Pushing the tag does, and only a human pushes the tag.
 4. **Published version tags are immutable.** `1.9.0` is built once and never
-   re-pushed. Got it wrong? Cut `1.9.1`. Only `latest`, `1.9`, `1`, `edge` and
-   `main` are ever allowed to move.
+   re-pushed. Got it wrong? Cut `1.9.1`. Only `latest`, `1.9`, `1` and `main`
+   are ever allowed to move.
 5. **`main` is always shippable.** Every merge publishes a container image, so
    `main` is continuously proven to build and to produce a working image.
 6. **The changelog is the release notes.** The GitHub Release body is generated
@@ -33,7 +33,7 @@ Published to the GitHub Container Registry at
 | `1` | on each minor | tag push | tracking a major line |
 | `latest` | on each stable release | tag push | demos, quick starts |
 | `sha-<short>` | never | merge to `main` | bisecting, pinning an unreleased fix |
-| `edge`, `main` | on each merge | merge to `main` | staging against unreleased `main` |
+| `main` | on each merge | merge to `main` | staging against unreleased `main` |
 
 A pre-release tag (`v1.9.0-rc.1`) publishes `1.9.0-rc.1` only. It never takes
 `latest`, `1.9` or `1`, and the GitHub Release is marked as a pre-release.
@@ -50,8 +50,8 @@ Say the new version is `1.9.0`.
 
    Confirm locally with `make check-version` before pushing — the `ci` workflow
    runs the same check and blocks the merge otherwise.
-2. Get the pull request reviewed and merged. The merge publishes `edge`, `main`
-   and `sha-<short>` images, but no release.
+2. Get the pull request reviewed and merged. The merge publishes `main` and
+   `sha-<short>` images, but no release.
 3. Tag the merge commit on `main` and push it:
 
    ```console
@@ -77,7 +77,7 @@ release were published — fix the tree, merge, and push a corrected tag.
 | Pull request opened, and every push to it | `gitleaks` | scans the full git history for secrets |
 | Pull request opened | `commitlint` | Conventional Commits check |
 | Merge to `main` | `ci`, `gitleaks` | the same gates, on the merge commit |
-| Merge to `main` | `container` | publishes `edge`, `main`, `sha-<short>` |
+| Merge to `main` | `container` | publishes `main`, `sha-<short>` |
 | Push tag `v*` | `release` | verifies, publishes the version tags, cuts the GitHub Release |
 
 ## Running the gates locally

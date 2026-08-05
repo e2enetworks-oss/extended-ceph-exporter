@@ -75,7 +75,7 @@ Applying this will create an user with all permissions needed.
 * To run the exporter locally you can use one of the methods:
     * Using `go` command, run `go run .`
     * Download a [release binary](releases).
-    * Use the container image available from [ghcr.io/e2enetworks-oss/extended-ceph-exporter](https://github.com/e2enetworks-oss/extended-ceph-exporter/pkgs/container/extended-ceph-exporter). Pin a version tag such as `1.8.0`; `edge` tracks `main` and moves on every merge. See [`RELEASE.md`](RELEASE.md#container-images) for the full tag list.
+    * Use the container image available from [ghcr.io/e2enetworks-oss/extended-ceph-exporter](https://github.com/e2enetworks-oss/extended-ceph-exporter/pkgs/container/extended-ceph-exporter). `latest` is the newest release; pin a version tag such as `1.8.0` for production. See [`RELEASE.md`](RELEASE.md#container-images) for the full tag list.
 
 * Should you have Grafana running for metrics visulization, check out the available [Grafana dashboards](grafana/).
 

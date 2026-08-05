@@ -1,6 +1,6 @@
 ## Unreleased
 
-* [CHANGE] Container images are now published to `ghcr.io/e2enetworks-oss/extended-ceph-exporter` for `linux/amd64` and `linux/arm64`. The Docker Hub image is no longer published. See [`RELEASE.md`](/RELEASE.md) for the full tag list; `edge` tracks `main`, and only a version tag is safe to pin.
+* [CHANGE] Container images are now published to `ghcr.io/e2enetworks-oss/extended-ceph-exporter` for `linux/amd64` and `linux/arm64`. The Docker Hub image is no longer published. `latest` follows the newest release and a version tag such as `1.8.0` is the safe pin; see [`RELEASE.md`](/RELEASE.md) for the full tag list.
 * [CHANGE] **BREAKING CHANGES** The Helm chart is removed. This fork ships a container image only; deploy it with your own manifests. The chart remains in git history at the `1.8.0` tag for anyone who needs it.
 * [CHANGE] **BREAKING CHANGES** The metrics namespace changed from `ceph` to `custom` (for example `ceph_rgw_bucket_size` is now `custom_rgw_bucket_size`), to stay compatible with the metric names of the in-house RBD exporter this replaces.
 * [CHANGE] **BREAKING CHANGES** The `cache` config block is replaced by `refresh` (see [`config.example.yaml`](/config.example.yaml)). Caching is no longer optional; it is how the background refreshers publish their results.
