@@ -1,0 +1,112 @@
+name: ci
+
+# The pull request gate. Every job here runs when a pull request is opened and
+# again on every commit pushed to it (the `synchronize` event), and once more on
+# the merge commit that lands on main.
+#
+# Supersedes the old test.yml, which ran the test/promu/license trio through a
+# nix devshell. The Ceph headers now come from apt, the same packages the
+# Dockerfile installs, so a green build here means the image builds too.
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# A new commit on a pull request cancels the previous run for that branch. Runs
+# on main are keyed by commit so none of them cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # gofmt parses, it does not typecheck, so this job skips the Ceph headers
+      # and reports formatting in seconds rather than waiting on apt.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make style
+
+  vet:
+    name: go vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go-ceph
+      - run: make vet
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go-ceph
+      # The action is used instead of `make lint` purely for its result cache;
+      # both read the same .golangci.yml, so local and CI verdicts agree.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          args: --timeout 10m
+
+  test:
+    name: go test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go-ceph
+      # -race is not optional on this codebase: each collector is refreshed by
+      # its own background goroutine publishing into a shared cache, which is
+      # exactly the shape a data race hides in.
+      - run: make test
+
+  build:
+    name: build and license headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go-ceph
+      # `make build` pulls promu, which check_license also needs.
+      - run: make build
+      - run: make check_license
+
+  version-guard:
+    name: version and changelog agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Catches a version bump that forgot its CHANGELOG.md section while it is
+      # still a pull request. Without this the mismatch only surfaces when the
+      # release tag is pushed, by which point the fix needs a second tag.
+      - run: make check-version
+
+  ci:
+    name: ci
+    # Single status to require on main once branch protection is configured:
+    # adding a gate above never means editing the protection rule.
+    needs: [fmt, vet, lint, test, build, version-guard]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report gate result
+        run: |
+          set -euo pipefail
+          if [ "${RESULTS}" != "${RESULTS//failure/}" ] || \
+             [ "${RESULTS}" != "${RESULTS//cancelled/}" ]; then
+            echo "::error::one or more ci gates did not pass: ${RESULTS}"
+            exit 1
+          fi
+          echo "all ci gates passed"
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}

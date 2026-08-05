@@ -36,13 +36,17 @@ PROMU_URL     := https://github.com/prometheus/promu/releases/download/v$(PROMU_
 PROMU := $(FIRST_GOPATH)/bin/promu
 # END copied code
 
-pkgs = $(shell go list ./... | grep -v /vendor/ | grep -v /test/)
+GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT         := $(FIRST_GOPATH)/bin/golangci-lint
 
-CONTAINER_IMAGE_NAME ?= docker.io/galexrt/extended-ceph-exporter
+pkgs = $(shell go list ./... | grep -v /vendor/ | grep -v /test/)
+GOFILES = $(shell find . -path ./vendor -prune -o -name '*.go' -print)
+
+CONTAINER_IMAGE_NAME ?= ghcr.io/e2enetworks-oss/extended-ceph-exporter
 CONTAINER_IMAGE_TAG  ?= $(subst /,-,$(shell git rev-parse --abbrev-ref HEAD))
 CONTAINER_ARCHES ?= linux/amd64,linux/arm64
 
-all: format style vet test build
+all: format style vet lint test build
 
 build: promu
 	@echo ">> building binaries"
@@ -66,6 +70,7 @@ container-build:
 	docker build \
 		--build-arg BUILD_DATE="$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')" \
 		--build-arg REVISION="$(shell git rev-parse HEAD)" \
+		--build-arg VERSION="$(VERSION)" \
 		-t "$(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG)" \
 		.
 	docker tag "$(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG)" "$(CONTAINER_IMAGE_NAME):latest"
@@ -74,46 +79,39 @@ container-publish:
 	docker push "$(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG)"
 	docker push "$(CONTAINER_IMAGE_NAME):latest"
 
-container-crossbuild-prepare:
-	if ! docker buildx ls | grep -q container-builder; then \
-		docker buildx create \
-			--name container-builder \
-			--driver docker-container \
-			--bootstrap --use; \
-	fi
-
-container-crossbuild: container-crossbuild-prepare
-	docker buildx build \
-		--progress=plain \
-		--platform $(CONTAINER_ARCHES) \
-		--build-arg BUILD_DATE="$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-		--build-arg REVISION="$(shell git rev-parse HEAD)" \
-		-t "$(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG)" \
-		-t "ghcr.io/galexrt/extended-ceph-exporter:$(CONTAINER_IMAGE_TAG)" \
-		--push \
-		.
-
-	$(MAKE) container-crossbuild-binaries
-
-container-crossbuild-binaries:
+# Extract the release binary out of an already-published multi-architecture
+# image and lay it out as the tarball attached to the GitHub Release. `docker
+# create` never starts the container, so a foreign-architecture image can be
+# unpacked on an amd64 host without QEMU. The release workflow calls this after
+# the image manifest is pushed.
+release-binaries:
 	mkdir -p .output
 	cd .output/ && \
 	for ARCH in $(subst $(comma), ,$(CONTAINER_ARCHES)); do \
 		RELEASE_FILE_NAME="extended-ceph-exporter-$$(echo $(CONTAINER_IMAGE_TAG) | sed -e 's/^v//').$$(echo $$ARCH | sed -e 's/\//-/g')"; \
 		mkdir -p "$$RELEASE_FILE_NAME"; \
 		cp -vf ../LICENSE "$$RELEASE_FILE_NAME/"; \
-		docker cp $$(docker create --rm --platform $$(echo $$ARCH | cut -d'/' -f2) --name ece-tc $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG)):/bin/extended-ceph-exporter "$$RELEASE_FILE_NAME/" && \
-			docker rm ece-tc; \
-		tar cvf $$RELEASE_FILE_NAME.tar.gz "$$RELEASE_FILE_NAME"; \
+		CONTAINER_ID="$$(docker create --platform $$ARCH "$(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG)")"; \
+		docker cp "$$CONTAINER_ID:/bin/extended-ceph-exporter" "$$RELEASE_FILE_NAME/"; \
+		docker rm "$$CONTAINER_ID"; \
+		tar czf "$$RELEASE_FILE_NAME.tar.gz" "$$RELEASE_FILE_NAME"; \
 		rm -rf "$$RELEASE_FILE_NAME"; \
 	done
 
 format:
 	go fmt $(pkgs)
 
-helm-docs:
-	GO111MODULE=on go install github.com/norwoodj/helm-docs/cmd/helm-docs@v1.11.0
-	helm-docs --chart-search-root=./charts
+golangci-lint:
+	@if ! [ -x "$(GOLANGCI_LINT)" ] || \
+		! "$(GOLANGCI_LINT)" --version 2>/dev/null | grep -q "$(patsubst v%,%,$(GOLANGCI_LINT_VERSION))"; then \
+		echo ">> installing golangci-lint $(GOLANGCI_LINT_VERSION)"; \
+		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+			| sh -s -- -b $(FIRST_GOPATH)/bin $(GOLANGCI_LINT_VERSION); \
+	fi
+
+lint: golangci-lint
+	@echo ">> linting code"
+	@$(GOLANGCI_LINT) run --timeout 10m
 
 promu:
 	$(eval PROMU_TMP := $(shell mktemp -d))
@@ -122,12 +120,17 @@ promu:
 	cp $(PROMU_TMP)/promu-$(PROMU_VERSION).$(GO_BUILD_PLATFORM)/promu $(FIRST_GOPATH)/bin/promu
 	rm -r $(PROMU_TMP)
 
-promu-release:
-	$(PROMU) release .output/
-
 style:
 	@echo ">> checking code style"
-	@! gofmt -d $(shell find . -path ./vendor -prune -o -name '*.go' -print) | grep '^'
+	@OUTPUT="$$(gofmt -l $(GOFILES))"; \
+	if [ -n "$$OUTPUT" ]; then \
+		echo "The following files are not gofmt formatted:"; \
+		echo "$$OUTPUT"; \
+		echo "Run 'make format' to fix them."; \
+		exit 1; \
+	else \
+		echo "All files gofmt formatted"; \
+	fi
 
 tarball: tree                                                                                                                                       
 	@echo ">> building release tarball"
@@ -137,7 +140,8 @@ clean:
 	rm -rf $(PROJECTNAME) $(PROJECTNAME).spec $(PROJECTNAME)-$(VERSION).tar.gz 
 	
 test:
-	@$(GO) test $(pkgs)
+	@echo ">> running tests"
+	@$(GO) test -race -count=1 $(pkgs)
 
 test-short:
 	@echo ">> running short tests"
@@ -147,4 +151,31 @@ vet:
 	@echo ">> vetting code"
 	@$(GO) vet $(pkgs)
 
-.PHONY: all build container container-publish format promu style tarball test test-short vet
+# ── Release versioning ──────────────────────────────────────────────────────
+# The VERSION file is the single source of truth. A release is cut by tagging
+# v$(VERSION) on main; check-version is what stops a tag being cut against a
+# changelog that never caught up. See RELEASE.md.
+
+check-version:
+	@set -e; \
+	V="$(VERSION)"; \
+	FAIL=0; \
+	if ! echo "$$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$$'; then \
+		echo "INVALID  VERSION is not semantic versioning: $$V"; FAIL=1; \
+	fi; \
+	if ! grep -Eq "^## $$V / [0-9]{4}-[0-9]{2}-[0-9]{2}$$" CHANGELOG.md; then \
+		echo "MISSING  CHANGELOG.md has no '## $$V / YYYY-MM-DD' section"; \
+		echo "         rename the '## Unreleased' heading when cutting the release"; FAIL=1; \
+	fi; \
+	if [ "$$FAIL" = "0" ]; then \
+		echo "VERSION $$V agrees with CHANGELOG.md"; \
+	else \
+		echo "Add the CHANGELOG.md entry for $$V, then re-run."; exit 1; \
+	fi
+
+release-notes:
+	@./scripts/extract-changelog.sh "$(VERSION)"
+
+.PHONY: all build check_license check-version container container-build container-publish \
+	format golangci-lint lint promu release-binaries release-notes style \
+	tarball test test-short vet clean

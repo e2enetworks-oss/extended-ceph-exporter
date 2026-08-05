@@ -1,3 +1,28 @@
+## 2.0.0 / 2026-08-05
+
+* [CHANGE] Container images are now published to `ghcr.io/e2enetworks-oss/extended-ceph-exporter` for `linux/amd64` and `linux/arm64`. The Docker Hub image is no longer published. `latest` follows the newest release and a version tag such as `1.8.0` is the safe pin; see [`RELEASE.md`](/RELEASE.md) for the full tag list.
+* [CHANGE] **BREAKING CHANGES** The Helm chart is removed. This fork ships a container image only; deploy it with your own manifests. The chart remains in git history at the `1.8.0` tag for anyone who needs it.
+* [CHANGE] **BREAKING CHANGES** The metrics namespace changed from `ceph` to `custom` (for example `ceph_rgw_bucket_size` is now `custom_rgw_bucket_size`), to stay compatible with the metric names of the in-house RBD exporter this replaces.
+* [CHANGE] **BREAKING CHANGES** The `cache` config block is replaced by `refresh` (see [`config.example.yaml`](/config.example.yaml)). Caching is no longer optional; it is how the background refreshers publish their results.
+* [CHANGE] **BREAKING CHANGES** The default enabled collectors are now `rbd_images` and `rbd_image_usage`. The RGW collectors and `rbd_volumes` are still available but disabled by default.
+* [CHANGE] **BREAKING CHANGES** The `realm` label on `scrape_collector_duration_seconds` and `scrape_collector_success` is renamed to `client`.
+* [CHANGE] The default `timeouts.collector` is raised from `60s` to `3m`, because collecting RBD image usage on a cluster without the `fast-diff` image feature can take minutes.
+* [CHANGE] Pools that hold no RBD images are skipped instead of being walked.
+* [FEATURE] New `rbd_images` collector exposing per image provisioned size, creation timestamp, tenant ownership from `e2e.*` image metadata, and QoS IOPS limits.
+* [FEATURE] New `rbd_image_usage` collector exposing how much space each image actually occupies.
+* [FEATURE] Each collector is now refreshed by its own background goroutine on its own interval (`refresh.interval` and `refresh.intervals`), so a slow collector can no longer delay or time out a scrape, and a cheap collector can be kept much fresher than an expensive one.
+* [FEATURE] New `custom_rbd_last_refresh_timestamp_seconds{collector}` metric, reporting when each collector last completed a cycle so that a stalled collector is alertable.
+* [FEATURE] New `--web.listen-address`, `--collector-timeout`, `--refresh-interval` and `--refresh-intervals` flags. A flag that is explicitly passed now overrides the config file.
+* [FEATURE] librados operation timeouts (`rbd.opTimeout`) are applied when librados has none configured, so a request the cluster never answers can no longer block a collector until the exporter is restarted.
+* [FIX] A failure to bind the listen address no longer exits with status 0. The error from the HTTP server was discarded, so an address already in use ended the process silently and the exporter looked healthy to its supervisor while serving nothing.
+* [FIX] The rados connection was assigned to a shadowed variable, so every client was given a nil connection and all RBD collectors failed.
+* [FIX] RBD collectors obtained images through `rbd.GetImage`, which returns an unopened handle, so every accessor failed with `ErrImageNotOpen`. Images are now opened read-only and closed again.
+* [FIX] RBD collection leaked a rados IO context per pool on every scrape.
+* [FIX] Images in a pool's default RBD namespace were skipped, because the namespace list was replaced by the discovered named namespaces and otherwise fell back to the all-namespaces sentinel.
+* [FIX] A deployment with only RBD collectors enabled exported no metrics at all, because clients were only created from RGW realms.
+* [FIX] The RGW collectors no longer dereference a nil API connection when no realm is configured, and report a clear error instead.
+* [FIX] `realms.yaml` is now optional, so an RBD-only deployment no longer needs a stub file to start.
+
 ## 1.8.0 / 2025-11-18
 
 * [FEATURE] Add enabled collectors list to config and Helm chart
