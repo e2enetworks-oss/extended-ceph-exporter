@@ -17,15 +17,18 @@ FROM docker.io/library/debian:trixie-slim
 ARG BUILD_DATE="N/A"
 ARG REVISION="N/A"
 
-LABEL org.opencontainers.image.authors="Alexander Trost <me@galexrt.moe>" \
+# image.source is what GHCR uses to link a published package to a repository and
+# inherit its visibility and permissions, so it has to name this fork rather than
+# upstream. Code attribution lives in LICENSE and the per-file copyright headers.
+LABEL org.opencontainers.image.authors="E2E Networks" \
     org.opencontainers.image.created="${BUILD_DATE}" \
-    org.opencontainers.image.title="galexrt/extended-ceph-exporter" \
-    org.opencontainers.image.description="A Prometheus exporter to provide \"extended\" metrics about a Ceph cluster's running components (e.g., RGW)." \
-    org.opencontainers.image.documentation="https://github.com/galexrt/extended-ceph-exporter/blob/main/README.md" \
-    org.opencontainers.image.url="https://github.com/galexrt/extended-ceph-exporter" \
-    org.opencontainers.image.source="https://github.com/galexrt/extended-ceph-exporter" \
+    org.opencontainers.image.title="e2enetworks-oss/extended-ceph-exporter" \
+    org.opencontainers.image.description="A Prometheus exporter for \"extended\" Ceph metrics, including per-RBD-image tenant ownership, QoS limits and capacity. Fork of galexrt/extended-ceph-exporter." \
+    org.opencontainers.image.documentation="https://github.com/e2enetworks-oss/extended-ceph-exporter/blob/main/README.md" \
+    org.opencontainers.image.url="https://github.com/e2enetworks-oss/extended-ceph-exporter" \
+    org.opencontainers.image.source="https://github.com/e2enetworks-oss/extended-ceph-exporter" \
     org.opencontainers.image.revision="${REVISION}" \
-    org.opencontainers.image.vendor="galexrt" \
+    org.opencontainers.image.vendor="E2E Networks" \
     org.opencontainers.image.version="N/A"
 
 VOLUME /config
