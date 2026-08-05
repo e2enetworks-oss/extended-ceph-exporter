@@ -82,14 +82,13 @@ jobs:
       - run: make check_license
 
   version-guard:
-    name: version, changelog and chart agree
+    name: version and changelog agree
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Catches a version bump that forgot the CHANGELOG.md section or the Helm
-      # chart appVersion while it is still a pull request. Without this the
-      # mismatch only surfaces when the release tag is pushed, by which point
-      # the fix needs a second tag.
+      # Catches a version bump that forgot its CHANGELOG.md section while it is
+      # still a pull request. Without this the mismatch only surfaces when the
+      # release tag is pushed, by which point the fix needs a second tag.
       - run: make check-version
 
   ci:
