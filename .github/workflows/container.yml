@@ -1,0 +1,42 @@
+name: container
+
+# Publishes the container image for every commit that lands on main — that is,
+# every merged pull request.
+#
+#   ghcr.io/e2enetworks-oss/extended-ceph-exporter:edge          moving, latest main
+#   ghcr.io/e2enetworks-oss/extended-ceph-exporter:main          moving, branch alias
+#   ghcr.io/e2enetworks-oss/extended-ceph-exporter:sha-<short>   immutable, per commit
+#
+# None of these are release tags. `latest` and the semantic version tags are
+# only ever moved by release.yml, so pulling `latest` never lands on an
+# unreleased main. Deploy `sha-<short>` when you want a pin that will not move.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+# Merges queue rather than cancel: every commit on main gets its own immutable
+# sha- tag, so cancelling an in-flight build would leave a gap in that series.
+concurrency:
+  group: container-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-push.yml
+    with:
+      # Not a released version — the label says so rather than claiming the
+      # version this commit happens to sit on top of.
+      version: edge
+      tags: |
+        type=raw,value=edge
+        type=raw,value=main
+        type=sha,prefix=sha-,format=short

@@ -1,0 +1,149 @@
+name: build and push container
+
+# Reusable container build, called by:
+#   container.yml  every merge into main  -> edge / main / sha-<short>
+#   release.yml    every v* tag           -> X.Y.Z / X.Y / X / latest
+# One definition means the image published on a merge and the image published on
+# a release are built identically; only the tags and the version label differ.
+#
+# Each architecture is built on a runner of that architecture and pushed by
+# digest, then a second job stitches the digests into one manifest list. The
+# alternative — one buildx run with QEMU — emulates a cgo build against the Ceph
+# C libraries, which is slow enough to be its own failure mode.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Value stamped into the org.opencontainers.image.version label.
+        required: true
+        type: string
+      tags:
+        description: Newline separated docker/metadata-action tag expressions.
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive platform slug
+        id: platform
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "slug=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive build timestamp
+        id: build_date
+        run: echo "value=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          # BuildKit itself comes through the Docker Hub mirror too, so a build
+          # never depends on an anonymous Docker Hub pull.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No labels are injected here on purpose: the Dockerfile owns the OCI
+      # labels, including the image.source that GHCR reads to link the package
+      # to this fork. Only the three values it cannot know are passed in.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: |
+            BUILD_DATE=${{ steps.build_date.outputs.value }}
+            REVISION=${{ github.sha }}
+            VERSION=${{ inputs.version }}
+          cache-from: type=gha,scope=${{ steps.platform.outputs.slug }}
+          cache-to: type=gha,mode=max,scope=${{ steps.platform.outputs.slug }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ steps.platform.outputs.slug }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: publish manifest list
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: ${{ inputs.tags }}
+
+      - name: Create and push the manifest list
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2046 # word splitting is how the tag and digest
+          # lists are turned into separate arguments.
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect the published image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          TAG: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "${IMAGE}:${TAG}"

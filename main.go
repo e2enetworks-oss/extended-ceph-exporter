@@ -224,7 +224,9 @@ func main() {
 
 	logger.Info(fmt.Sprintf("listening on %s", cfg.ListenHost))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`<!DOCTYPE html>
+		// A failed write to the landing page is the client hanging up; there is
+		// no recovery and nothing useful to log per request.
+		_, _ = w.Write([]byte(`<!DOCTYPE html>
 <html>
 	<head><title>Extended Ceph Exporter</title></head>
 	<body>
@@ -242,7 +244,11 @@ func main() {
 
 	http.HandleFunc(cfg.MetricsPath, handler.ServeHTTP)
 
-	http.ListenAndServe(cfg.ListenHost, nil)
+	// ListenAndServe only ever returns on failure. Discarding that error meant a
+	// failure to bind the port — an address already in use, an unusable
+	// interface — returned from main with exit code 0, so the exporter looked
+	// healthy to its supervisor while serving nothing at all.
+	logger.Fatal("http server stopped", zap.Error(http.ListenAndServe(cfg.ListenHost, nil)))
 }
 
 // applyFlagOverrides folds the command line into the loaded config.

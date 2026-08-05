@@ -48,7 +48,7 @@ Applying this will create an user with all permissions needed.
 
 * Clone the repository, download release binary or pull the container image:
   ```console
-  git clone https://github.com/galexrt/extended-ceph-exporter
+  git clone https://github.com/e2enetworks-oss/extended-ceph-exporter
   cd extended-ceph-exporter
   ```
 
@@ -75,8 +75,7 @@ Applying this will create an user with all permissions needed.
 * To run the exporter locally you can use one of the methods:
     * Using `go` command, run `go run .`
     * Download a [release binary](releases).
-    * Use the container image avaialble from [ghcr.io/galexrt/extended-ceph-exporter](https://github.com/galexrt/extended-ceph-exporter/pkgs/container/extended-ceph-exporter).
-    * [Helm chart](charts/extended-ceph-exporter/README.md) for Kubernetes/OpenShift deployment.
+    * Use the container image available from [ghcr.io/e2enetworks-oss/extended-ceph-exporter](https://github.com/e2enetworks-oss/extended-ceph-exporter/pkgs/container/extended-ceph-exporter). Pin a version tag such as `1.8.0`; `edge` tracks `main` and moves on every merge. See [`RELEASE.md`](RELEASE.md#container-images) for the full tag list.
 
 * Should you have Grafana running for metrics visulization, check out the available [Grafana dashboards](grafana/).
 
@@ -88,7 +87,7 @@ and host networking so the exporter can reach the monitors:
 ```console
 podman run -d --name extended-ceph-exporter --net=host \
   -v /etc/ceph:/etc/ceph:ro \
-  localhost/extended-ceph-exporter:v2 \
+  ghcr.io/e2enetworks-oss/extended-ceph-exporter:1.8.0 \
   --web.listen-address=:9138 \
   --collector-timeout=3m \
   --refresh-intervals=rbd_images=30s,rbd_image_usage=2m
@@ -106,9 +105,12 @@ takes, which is roughly what `rbd du` needs over the same pools. A cycle that
 overruns its interval is abandoned and logged, and because a blocked librados
 call cannot be cancelled, its goroutine is leaked until the exporter restarts.
 
-### Helm
-
-To install the exporter to Kubernetes using Helm, please check out the [extended-ceph-exporter Helm Chart README.md file](charts/extended-ceph-exporter/README.md).
+The exporter is cluster scoped, not host scoped. It reports on RBD images and
+RGW buckets across the whole cluster and nothing about the machine it runs on,
+so run **one instance per cluster**. Per daemon and per host metrics come from
+`ceph-mgr`'s prometheus module and `node_exporter` respectively. It only has to
+reach the monitors — a mon, OSD or MDS node is convenient because the config and
+keyring are already there, but any client host works.
 
 ## Collectors
 
@@ -222,15 +224,20 @@ exit status 2
 
 ### Requirements
 
-* Golang 1.23.x (or higher should work)
-* Ceph development files/libraries (`librados`, `librdb`)
-    * If you are using `nix`, the `flake.nix` should be satisfy these lib dependencies.
-* `helm`
+* Golang 1.26.x (the version in `go.mod`)
+* Ceph development files/libraries (`librados`, `librbd`, `libcephfs`)
+    * If you are using `nix`, the `flake.nix` should satisfy these lib dependencies.
+    * On Debian or Ubuntu: `libcephfs-dev librbd-dev librados-dev pkg-config`
 
-### Making Changes to the Helm Chart
+### Checks
 
-When changing anything in the Helm Chart, the version in the `Chart.yaml` needs to be increased according to [Semver](https://semver.org/).
-Additionally `make helm-doc` must be run afterwards and the changes to the Helm Chart's `README.md` must be commited as well.
+The same gates Continuous Integration (CI) runs on every pull request:
+
+```console
+make style vet lint test build
+```
+
+Releases are cut by pushing a `v*` tag; see [`RELEASE.md`](RELEASE.md).
 
 ### Debugging
 

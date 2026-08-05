@@ -1,0 +1,134 @@
+name: release
+
+# Cutting a release is one manual act: push the tag.
+#
+#   git tag -s v1.9.0 && git push origin v1.9.0
+#
+# Everything downstream is automatic and everything upstream was already checked
+# by ci.yml on the pull request that bumped VERSION. This workflow verifies the
+# tag is telling the truth before it publishes anything, because a tag is the one
+# artefact consumers pin against and re-cutting one is not an option.
+#
+# Supersedes build_release.yml, which pushed to Docker Hub with
+# CONTAINER_REGISTRY_* secrets that do not exist in this organisation.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. Refuse to publish a tag that disagrees with the tree ──────────────
+  verify:
+    name: verify tag, version and changelog
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag matches the VERSION file
+        id: version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION="$(cat VERSION)"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v${TAG} does not match the VERSION file (${VERSION})"
+            exit 1
+          fi
+          echo "tag v${TAG} matches VERSION ${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # A release built from a commit that never landed on main is a release
+      # nobody can reproduce from the default branch.
+      - name: Verify the tag is an ancestor of main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_SHA} is not on main — releases are cut from main only"
+            exit 1
+          fi
+          echo "tagged commit is on main"
+
+      # Same gate ci.yml ran on the pull request. Repeated here because the tag
+      # is what actually ships, and nothing guarantees it points at the commit
+      # that was reviewed.
+      - name: Verify VERSION, CHANGELOG.md and the Helm chart agree
+        run: make check-version
+
+      - name: Preview the release notes
+        run: ./scripts/extract-changelog.sh "${{ steps.version.outputs.version }}"
+
+  # ── 2. Publish the release image ─────────────────────────────────────────
+  container:
+    name: container
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-push.yml
+    with:
+      version: ${{ needs.verify.outputs.version }}
+      # A pre-release tag (v1.9.0-rc.1) is excluded from latest and from the
+      # floating X and X.Y tags by docker/metadata-action's own semver handling,
+      # so an rc never becomes the default pull for anyone.
+      tags: |
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=semver,pattern={{major}}
+        type=raw,value=latest,enable=${{ !contains(needs.verify.outputs.version, '-') }}
+
+  # ── 3. Cut the GitHub Release ────────────────────────────────────────────
+  github-release:
+    name: github release
+    needs: [verify, container]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Unpacks the binary out of the image that was just published, so the
+      # tarball attached to the release is bit-for-bit the binary running in the
+      # container rather than a second build that merely used the same source.
+      - name: Extract the release binaries from the published image
+        env:
+          CONTAINER_IMAGE_TAG: ${{ needs.verify.outputs.version }}
+        run: make release-binaries
+
+      - name: Render the release notes
+        run: |
+          set -euo pipefail
+          {
+            ./scripts/extract-changelog.sh "$VERSION"
+            printf '\n## Container images\n\n'
+            printf '```\n'
+            printf 'docker pull ghcr.io/%s:%s\n' "$GITHUB_REPOSITORY" "$VERSION"
+            printf '```\n'
+          } > release-notes.md
+          cat release-notes.md
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          body_path: release-notes.md
+          files: .output/*.tar.gz
+          # A tag carrying a pre-release identifier (1.9.0-rc.1) is marked as a
+          # pre-release so it never shows as the repository's current version.
+          prerelease: ${{ contains(needs.verify.outputs.version, '-') }}
+          fail_on_unmatched_files: true

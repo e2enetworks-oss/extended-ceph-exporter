@@ -1,0 +1,54 @@
+name: gitleaks
+
+# Secret scan. Runs on every pull request event (including each new commit
+# pushed to an open pull request) and on every merge into main.
+#
+# This drives the gitleaks binary directly rather than gitleaks/gitleaks-action:
+# that action requires a GITLEAKS_LICENSE secret for organisation-owned
+# repositories, and this repository belongs to the e2enetworks-oss organisation.
+# Running the release binary keeps the gate working with no licence to provision
+# and no third-party action holding the GITHUB_TOKEN.
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    name: scan history for secrets
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      # Full history: a secret that was committed and then removed in a later
+      # commit is still recoverable from the pack, so scanning only the tip
+      # would pass a repository that is in fact compromised.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # --redact keeps a matched secret out of the workflow log, which is public
+      # on this repository; the finding still names the file, line and rule.
+      - name: Scan git history
+        run: gitleaks git --redact --no-banner --verbose .

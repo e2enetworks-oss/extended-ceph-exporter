@@ -1,5 +1,7 @@
 ## Unreleased
 
+* [CHANGE] Container images are now published to `ghcr.io/e2enetworks-oss/extended-ceph-exporter` for `linux/amd64` and `linux/arm64`. The Docker Hub image is no longer published. See [`RELEASE.md`](/RELEASE.md) for the full tag list; `edge` tracks `main`, and only a version tag is safe to pin.
+* [CHANGE] **BREAKING CHANGES** The Helm chart is removed. This fork ships a container image only; deploy it with your own manifests. The chart remains in git history at the `1.8.0` tag for anyone who needs it.
 * [CHANGE] **BREAKING CHANGES** The metrics namespace changed from `ceph` to `custom` (for example `ceph_rgw_bucket_size` is now `custom_rgw_bucket_size`), to stay compatible with the metric names of the in-house RBD exporter this replaces.
 * [CHANGE] **BREAKING CHANGES** The `cache` config block is replaced by `refresh` (see [`config.example.yaml`](/config.example.yaml)). Caching is no longer optional; it is how the background refreshers publish their results.
 * [CHANGE] **BREAKING CHANGES** The default enabled collectors are now `rbd_images` and `rbd_image_usage`. The RGW collectors and `rbd_volumes` are still available but disabled by default.
@@ -12,6 +14,7 @@
 * [FEATURE] New `custom_rbd_last_refresh_timestamp_seconds{collector}` metric, reporting when each collector last completed a cycle so that a stalled collector is alertable.
 * [FEATURE] New `--web.listen-address`, `--collector-timeout`, `--refresh-interval` and `--refresh-intervals` flags. A flag that is explicitly passed now overrides the config file.
 * [FEATURE] librados operation timeouts (`rbd.opTimeout`) are applied when librados has none configured, so a request the cluster never answers can no longer block a collector until the exporter is restarted.
+* [FIX] A failure to bind the listen address no longer exits with status 0. The error from the HTTP server was discarded, so an address already in use ended the process silently and the exporter looked healthy to its supervisor while serving nothing.
 * [FIX] The rados connection was assigned to a shadowed variable, so every client was given a nil connection and all RBD collectors failed.
 * [FIX] RBD collectors obtained images through `rbd.GetImage`, which returns an unopened handle, so every accessor failed with `ErrImageNotOpen`. Images are now opened read-only and closed again.
 * [FIX] RBD collection leaked a rados IO context per pool on every scrape.

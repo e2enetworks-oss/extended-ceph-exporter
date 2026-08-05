@@ -1,0 +1,26 @@
+name: Set up Go with Ceph libraries
+description: >-
+  Installs the librados/librbd/libcephfs development headers this exporter links
+  against through cgo, then sets up the Go toolchain pinned by go.mod. Every gate
+  that has to compile the collectors needs both halves — gofmt-only jobs do not.
+
+runs:
+  using: composite
+  steps:
+    # go-ceph binds to the Ceph C libraries, so without these headers `go vet`,
+    # `go test` and golangci-lint all fail at the typecheck step rather than
+    # reporting anything useful. These are the same packages the Dockerfile
+    # installs, so Continuous Integration (CI) and the image agree on the
+    # dependency surface.
+    - name: Install Ceph development libraries
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends \
+          libcephfs-dev librbd-dev librados-dev pkg-config
+
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
