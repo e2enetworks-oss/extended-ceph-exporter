@@ -1,0 +1,60 @@
+# golangci-lint configuration for extended-ceph-exporter.
+#
+# The collectors link against librados/librbd/libcephfs through go-ceph, so every
+# linter here needs cgo and the Ceph development headers present. Continuous
+# Integration (CI) installs them before invoking the linter; locally they come
+# from the nix devshell (`nix develop`, see flake.nix).
+#
+# Scope is deliberately narrow: the standard set plus a handful of linters that
+# catch bugs this exporter is structurally prone to (leaked handles on the Ceph
+# client, wrapped-error comparisons, swallowed errors in refresher goroutines).
+# Style-only linters are left off — gofmt is enforced separately by `make style`.
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    # Every rados/rbd handle this exporter opens has to be closed again; a
+    # leaked IO context per pool per scrape was a real defect in this codebase.
+    - bodyclose
+    # Errors are wrapped with %w in the collectors, so == comparisons and bare
+    # type assertions against them are silent breakage.
+    - errorlint
+    # A refresher goroutine that checks an error and then returns nil anyway
+    # publishes stale metrics without ever going unhealthy.
+    - nilerr
+    - unconvert
+    - misspell
+
+  settings:
+    # errcheck's check-type-assertions is deliberately left at its default (off).
+    # Enabling it flagged only assertions that cannot fail — http.DefaultTransport
+    # to *http.Transport, and a mapstructure hook that has already tested the
+    # source kind — so it bought comma-ok noise and no safety.
+    misspell:
+      locale: US
+    # staticcheck stays on its golangci-lint default check set. The full set adds
+    # the ST* style rules, which on this fork means package-comment churn across
+    # files inherited from upstream rather than defects.
+
+  exclusions:
+    generated: lax
+    presets:
+      # Keeps errcheck off the conventional no-op cases (deferred Close, Write
+      # to a ResponseWriter) that the standard library idiom deliberately ignores.
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # Test helpers assert on the happy path; unchecked setup errors there fail
+      # the test loudly anyway.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt

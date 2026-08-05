@@ -146,7 +146,7 @@ func eachRBDImageInPool(ctx context.Context, client *Client, ioctx *rados.IOCont
 
 		for _, name := range names {
 			// A librados call that is already blocked cannot be interrupted,
-			// but stopping between images keeps a cancelled or timed out
+			// but stopping between images keeps a canceled or timed out
 			// collection from walking the rest of the cluster.
 			if err := ctx.Err(); err != nil {
 				return multierr.Append(errs, err)
